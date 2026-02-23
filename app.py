@@ -6,110 +6,143 @@ import easyocr
 import re
 
 # Configuração da página
-st.set_page_config(page_title="Scanner de Patrimônio", layout="centered")
+st.set_page_config(page_title="Scanner Escolar", layout="centered", page_icon="🏫")
 
-# Inicializa o armazenamento de dados na sessão
+# --- GERENCIAMENTO DE ESTADO (MEMÓRIA) ---
 if 'registros' not in st.session_state:
     st.session_state.registros = []
 
-# Inicializa a memória para não duplicar a mesma foto
 if 'ultimo_arquivo_id' not in st.session_state:
     st.session_state.ultimo_arquivo_id = None
 
-# Carrega a IA de leitura de texto (cache para não recarregar a cada foto)
+# Carrega a IA (Cache)
 @st.cache_resource
 def carregar_leitor():
     return easyocr.Reader(['pt', 'en'])
 
 leitor_texto = carregar_leitor()
 
-st.title("📦 Scanner de Patrimônio")
-st.write("Selecione a categoria e tire uma foto do NÚMERO do patrimônio.")
+# --- CABEÇALHO E IDENTIFICAÇÃO DA SALA ---
+st.title("🏫 Scanner de Patrimônio")
 
-# Seleção da Categoria 
-opcoes_categorias = ["Mesas", "Cadeiras", "Estantes", "Ar-Condicionado", "Informática", "Nova Categoria..."]
-escolha_categoria = st.selectbox("Categoria do Item:", opcoes_categorias)
+# Campo para ela digitar a sala antes de começar
+nome_sala = st.text_input("Nome da Sala / Turma (Ex: Sala 3B, Cozinha):", placeholder="Digite o local aqui...")
+
+if not nome_sala:
+    st.warning("⚠️ Digite o nome da sala acima para liberar o scanner.")
+    st.stop() # Para o app aqui até ela digitar o nome
+
+st.write(f"📸 Registrando itens da: **{nome_sala}**")
+
+# --- SELEÇÃO DE CATEGORIA ---
+opcoes_categorias = ["Mesas", "Cadeiras", "Estantes", "Ar-Condicionado", "Informática", "Armários", "Nova Categoria..."]
+escolha_categoria = st.selectbox("O que você vai escanear agora?", opcoes_categorias)
 
 if escolha_categoria == "Nova Categoria...":
-    categoria_selecionada = st.text_input("Digite o nome da nova categoria:")
+    categoria_selecionada = st.text_input("Digite o nome da categoria:")
 else:
     categoria_selecionada = escolha_categoria
 
+# --- FUNÇÃO DE PROCESSAMENTO ---
 def processar_imagem(foto_arquivo):
     if not categoria_selecionada:
-        st.warning("Por favor, digite o nome da categoria antes de enviar a foto.")
+        st.error("Selecione ou digite uma categoria.")
         return
         
-    # --- TRAVA DE SEGURANÇA CONTRA DUPLICAÇÃO ---
-    # Verifica se esta foto exata já foi lida antes
+    # Evita processar a mesma foto duas vezes
     if st.session_state.ultimo_arquivo_id == foto_arquivo.file_id:
-        return # Interrompe a função, pois já processou essa imagem
-    # ---------------------------------------------
+        return 
 
+    # Lê a imagem
     file_bytes = np.asarray(bytearray(foto_arquivo.read()), dtype=np.uint8)
     imagem = cv2.imdecode(file_bytes, 1)
     
-    with st.spinner('Lendo a imagem com IA...'):
+    with st.spinner('Lendo número...'):
         resultados = leitor_texto.readtext(imagem, detail=0)
         numero_encontrado = None
         
+        # Procura números de 5 a 7 dígitos
         for texto in resultados:
-            texto_limpo = texto.replace(" ", "")
-            if re.fullmatch(r'\d{5,7}', texto_limpo):
-                numero_encontrado = texto_limpo
+            texto_limpo = texto.replace(" ", "").replace(".", "").replace("-", "")
+            if re.search(r'\d{5,7}', texto_limpo):
+                # Pega apenas a parte numérica se houver sujeira em volta
+                match = re.search(r'\d{5,7}', texto_limpo)
+                numero_encontrado = match.group()
                 break
         
-        # Marca que este arquivo já foi lido para não repetir se a página recarregar
         st.session_state.ultimo_arquivo_id = foto_arquivo.file_id
         
         if numero_encontrado:
-            st.success(f"Patrimônio lido com sucesso: {numero_encontrado}")
+            st.toast(f"✅ {categoria_selecionada}: {numero_encontrado} adicionado!", icon="✅")
             st.session_state.registros.append({
                 'Categoria': categoria_selecionada.upper(), 
                 'Patrimonio': numero_encontrado
             })
         else:
-            st.error("Não foi possível identificar os números. Tente focar apenas na numeração da etiqueta.")
+            st.error("Não achei o número. Tente chegar mais perto.")
 
-# Interface com Abas
-aba1, aba2 = st.tabs(["📸 Usar Câmera Nativa / Galeria", "📷 Câmera do Navegador"])
+# --- ABAS DE CÂMERA ---
+aba1, aba2 = st.tabs(["📱 Celular (Upload/Câmera)", "💻 Webcam"])
 
 with aba1:
-    st.info("No celular, esta opção permite usar o auto-foco da câmera do Android.")
-    foto_upload = st.file_uploader("Tire uma foto ou escolha da galeria", type=['png', 'jpg', 'jpeg'])
+    st.caption("Se ao clicar abaixo não aparecer 'Câmera', verifique as permissões do navegador.")
+    foto_upload = st.file_uploader("Tirar foto / Escolher Arquivo", type=['png', 'jpg', 'jpeg'], key="uploader")
     if foto_upload is not None:
         processar_imagem(foto_upload)
 
 with aba2:
-    foto_web = st.camera_input("Tire uma foto pelo navegador")
+    foto_web = st.camera_input("Tirar foto agora")
     if foto_web is not None:
         processar_imagem(foto_web)
 
 st.divider()
 
-# --- FORMATAÇÃO DA TABELA ---
+# --- EXIBIÇÃO E DOWNLOAD (CORREÇÃO DO ERRO DE TAMANHO) ---
 if st.session_state.registros:
-    st.subheader("Itens Lidos nesta Sessão")
+    st.subheader(f"Lista: {nome_sala}")
     
-    df_registros = pd.DataFrame(st.session_state.registros)
-    categorias_unicas = df_registros['Categoria'].unique()
+    # 1. Organiza os dados em listas separadas por categoria
+    dados_organizados = {}
+    for item in st.session_state.registros:
+        cat = item['Categoria']
+        pat = item['Patrimonio']
+        if cat not in dados_organizados:
+            dados_organizados[cat] = []
+        dados_organizados[cat].append(pat)
     
-    df_formatado = pd.DataFrame()
+    # 2. Descobre qual categoria tem mais itens (para nivelar a tabela)
+    max_linhas = 0
+    if dados_organizados:
+        max_linhas = max(len(lista) for lista in dados_organizados.values())
     
-    for cat in categorias_unicas:
-        valores = df_registros[df_registros['Categoria'] == cat]['Patrimonio'].reset_index(drop=True)
-        df_formatado[cat] = valores
+    # 3. Preenche as listas menores com vazio "" para todas terem o mesmo tamanho
+    for cat in dados_organizados:
+        while len(dados_organizados[cat]) < max_linhas:
+            dados_organizados[cat].append("")
+            
+    # 4. Cria o DataFrame quadrado perfeito
+    df_final = pd.DataFrame(dados_organizados)
     
-    df_exibicao = df_formatado.fillna("")
+    # Mostra na tela
+    st.dataframe(df_final, width=800)
     
-    st.dataframe(df_exibicao, width='stretch')
+    # Botão de Download
+    nome_arquivo = f"Patrimonio_{nome_sala.replace(' ', '_')}.csv"
+    csv = df_final.to_csv(index=False).encode('utf-8')
     
-    csv = df_formatado.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Baixar Planilha (CSV)",
-        data=csv,
-        file_name='patrimonio_escola.csv',
-        mime='text/csv',
-    )
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.download_button(
+            label=f"💾 Baixar Planilha da {nome_sala}",
+            data=csv,
+            file_name=nome_arquivo,
+            mime='text/csv',
+            type="primary"
+        )
+    with col2:
+        if st.button("🗑️ Limpar Tudo"):
+            st.session_state.registros = []
+            st.rerun()
+
 else:
-    st.write("Nenhum item lido ainda.")
+    st.info("Nenhum item lido nesta sala ainda.")
